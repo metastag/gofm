@@ -10,4 +10,5 @@ features
 - navigate folders with vim keys (hjkl)
 - open files via `xdg-open`
 - cut/copy/paste
-- delete 
+- delete files (confirm dialog box)
+- preview pane (for text files and folders)

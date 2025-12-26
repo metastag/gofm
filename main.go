@@ -1,15 +1,8 @@
 package main
 
-// Future scope
-// Confirmation prompt before deleting, look up tview dialog widget
-// Preview pane on the right, read below comment
-// For every j/k event, update the selected item global variable - if folder, do ls on that folder and display in preview pane
-// if file, do cat on that file and display in preview pane
-
 import (
 	"fmt"
 	"strings"
-	"log"
 	"os"
 	"os/exec"
 	"syscall"
@@ -18,16 +11,18 @@ import (
 )
 
 var (
-	bufferCmd string
-	buffer string
-	path = "/home/metastag"
+	selected string // currently selected item
+	selectedType string // file or folder
+	bufferCmd string // whether copy or cut operation
+	buffer string // store path of item to copy/cut
+	path = "/home/metastag" // starting location
 )
 
 // Returns true if path is a folder, else return false
 func checkFolder(input string) bool {
 	info, err := os.Stat(path + "/" +  input)
 	if err != nil {
-		log.Println("Error in checkFolder() - ", err)
+		fmt.Fprintf(os.Stdout, "Error in checkFolder() - ", err)
 		return false
 	}
 	if info.IsDir() {
@@ -56,7 +51,7 @@ func navigateBackward() {
 }
 
 // Helper function to refresh all panes together
-func refreshPanes(left *tview.List, center *tview.List) {
+func refreshPanes(left *tview.List, center *tview.List, preview *tview.TextView) {
 	refreshPane(left, parentFolder(path))
 	refreshPane(center, path)
 }
@@ -68,7 +63,7 @@ func refreshPane(pane *tview.List, folder string) {
 	// Read contents of folder, return any error
 	files, err := os.ReadDir(folder)
 	if err != nil {
-		log.Fatal("Error in refreshPane() - ", err)
+		fmt.Fprintf(os.Stdout, "Error in refreshPane() - ", err)
 	}
 
 	// Write the contents to pane line by line
@@ -82,21 +77,35 @@ func refreshPane(pane *tview.List, folder string) {
 	}
 }
 
+// Update preview pane
+func refreshPreview(pane *tview.TextView) {
+	var cmd *exec.Cmd
+	if selectedType == "file" && strings.Contains(selected, ".txt") {
+		cmd = exec.Command("cat", path + "/" + selected)
+	} else if selectedType == "folder" {
+		cmd = exec.Command("ls", path + "/" + selected)
+	} else {
+		return
+	}
+
+	out, err := cmd.Output()
+	if err != nil {
+		fmt.Fprintf(os.Stdout, "Error in refreshPreview() - ", err)
+	}
+	pane.Clear()
+	fmt.Fprintln(pane, string(out))
+}
+
 // Open folder/file - called by pressing l or Enter
-func openEvent(left *tview.List, center *tview.List) {
+func openEvent(left *tview.List, center *tview.List, preview *tview.TextView) {
 	// If empty folder, do nothing
 	if center.GetItemCount() == 0 {
 		return
 	}
-	// Get selected item
-	child, _ := center.GetItemText(center.GetCurrentItem())
 
-	// get index of [white] in string to differentiate file and folder
-	end := strings.LastIndex(child, "[white]")
-
-	// if there is no [white], it is a file, open with xdg-open
-	if end == -1 {
-		cmd := exec.Command("xdg-open", path + "/" + child)
+	// if selected item is file, open with xdg-open
+	if selectedType == "file" {
+		cmd := exec.Command("xdg-open", path + "/" + selected)
 		cmd.SysProcAttr = &syscall.SysProcAttr{
 			Setsid: true,
 		}
@@ -104,75 +113,62 @@ func openEvent(left *tview.List, center *tview.List) {
 		return
 	}
 
-	child = child[5:end] // remove [red] and [white] from start and end of string
-	navigateForward(child) // update path to new folder
-	refreshPanes(left, center) // update panes
+	navigateForward(selected) // update path to new folder
+	refreshPanes(left, center, preview) // update panes
 }
 
 // Delete selected file, ignore if folder for safety reasons
-func deleteEvent(title *tview.TextView, left *tview.List, center *tview.List) {
-	// Get selected item
-	child, _ := center.GetItemText(center.GetCurrentItem())
-
-	// get index of [white] in string to differentiate file and folder
-	end := strings.LastIndex(child, "[white]")
-
-	// if there is [white], it is a folder, ignore
-	if end != -1 {
+func deleteEvent(app *tview.Application, pages *tview.Pages, left *tview.List, center *tview.List, preview *tview.TextView) {
+	// If folder, ignore
+	if selectedType == "folder" {
 		return
 	}
 
-	// Delete file
-	cmd := exec.Command("rm", path + "/" + child)
-	_, err := cmd.Output()
-	if err != nil {
-		log.Println("Error in deleteEvent() - ", err)
-	}
-	// Refresh panes
-	refreshPanes(left, center)
+	// Confirmation dialog box
+	modal := tview.NewModal().
+		SetText("Delete " + selected + " file?").
+		AddButtons([]string{"Yes", "No, cancel"}).
+		SetDoneFunc(func(buttonIndex int, buttonLabel string) {
+			if buttonLabel == "Yes" {
+				// Delete file
+				cmd := exec.Command("rm", path + "/" + selected)
+				_, err := cmd.Output()
+				if err != nil {
+					fmt.Fprintf(os.Stdout, "Error in deleteEvent() - ", err)
+				}
+				// Refresh panes
+				refreshPanes(left, center, preview)
+			}
+			pages.RemovePage("modal")
+			app.SetFocus(center)
+		})
+	
+	pages.AddPage("modal", modal, true, true)
+	app.SetFocus(modal)
 }
 
 // Copy selected file, saves to buffer until pasteEvent() is called
 func copyEvent(center *tview.List) {
-	// Get selected item
-	child, _ := center.GetItemText(center.GetCurrentItem())
-
-	// get index of [white] in string to remove it
-	end := strings.LastIndex(child, "[white]")
-	if end != -1 {
-		child = child[5:end] // remove [red] and [white] from start and end of string
-	}
-
 	// Save path to buffer, to be used when pasteEvent() is called
 	bufferCmd = "cp"
-	buffer = path + "/" + child
+	buffer = path + "/" + selected
 }
 
 // Cut selected file, saves to buffer until pasteEvent() is called
 func cutEvent(center *tview.List) {
-	// Get selected item
-	child, _ := center.GetItemText(center.GetCurrentItem())
-
-	// get index of [white] in string to remove it
-	end := strings.LastIndex(child, "[white]")
-	if end != -1 {
-		child = child[5:end] // remove [red] and [white] from start and end of string
-	}
-
 	// Save path to buffer, to be used when pasteEvent() is called
 	bufferCmd = "mv"
-	buffer = path + "/" + child
-
+	buffer = path + "/" + selected
 }
 
 // Pastes file in buffer to current folder
-func pasteEvent(left *tview.List, center *tview.List) {
+func pasteEvent(left *tview.List, center *tview.List, preview *tview.TextView) {
 	cmd := exec.Command(bufferCmd, buffer, path)
 	_, err := cmd.Output()
 	if err != nil {
-		log.Println("Error in pasteEvent() - ", err)
+		fmt.Fprintf(os.Stdout, "Error in pasteEvent() - ", err)
 	}
-	refreshPanes(left, center) // refresh panes
+	refreshPanes(left, center, preview) // refresh panes
 }
 
 func main() {
@@ -195,13 +191,40 @@ func main() {
 
 	center.SetBorder(true).SetTitle("Current Folder")
 
+	// Preview pane widget
+	preview := tview.NewTextView()
+
+	preview.SetBorder(true).SetTitle("Preview Pane")
+
+	// Grid widget
+	grid := tview.NewGrid().
+		SetRows(2,0).
+		SetColumns(30,0,30).
+		AddItem(title, 0, 0, 1, 3, 0, 0, false)
+		
+	// Layout for screens narrower than 100 cells (left is hidden)
+	grid.AddItem(left, 0, 0, 0, 0, 0, 0, false).
+		AddItem(center, 1, 0, 1, 3, 0, 0, false)
+
+	// Layout for screens wider than 100 cells.
+	grid.AddItem(left, 1, 0, 1, 1, 0, 100, false).
+		AddItem(center, 1, 1, 1, 1, 0, 100, false).
+		AddItem(preview, 1, 2, 1, 1, 0, 100, false)
+
+	refreshPanes(left, center, preview)
+
+
+	// Wrap the grid in a pages widget (required to display modal during deletion)
+	pages := tview.NewPages()
+	pages.AddPage("main", grid, true, true)
+
 	// Define keybindings
 	center.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		if event.Rune() == 'h' { // h - go back one folder
 			navigateBackward()
-			refreshPanes(left, center)
+			refreshPanes(left, center, preview)
 		} else if event.Rune() == 'l' { // l - Open folder/file
-			openEvent(left, center)
+			openEvent(left, center, preview)
 		} else if event.Rune() ==  'j' { // j - go down one cell
 			return tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone)
 	    	} else if event.Rune() == 'k' { // k - go up one cell
@@ -211,38 +234,40 @@ func main() {
 		} else if event.Rune() == 'g' { // g - navigate to top
 			return tcell.NewEventKey(tcell.KeyPgUp, 0, tcell.ModNone)
 		} else if event.Rune() == 13 { // Enter - Open folder/file
-			openEvent(left, center)
+			openEvent(left, center, preview)
 		} else if event.Rune() == 'd' { // d - delete selected file
-			deleteEvent(title, left, center)
+			deleteEvent(app, pages, left, center, preview)
 		} else if event.Rune() == 'c' { // c - copy selected file
 			copyEvent(center)
 		} else if event.Rune() == 'x' { // x - cut selected file
 			cutEvent(center)
 		} else if event.Rune() == 'p' { // p - paste in current folder
-			pasteEvent(left, center)
+			pasteEvent(left, center, preview)
+		} else if event.Rune() == 'q' { // q - quit
+			app.Stop()
 		}
 		return event
 	})
 
-	// Grid widget
-	grid := tview.NewGrid().
-		SetRows(2,0).
-		SetColumns(50,0).
-		AddItem(title, 0, 0, 1, 3, 0, 0, false)
-		
-	// Layout for screens narrower than 100 cells (left is hidden)
-	grid.AddItem(left, 0, 0, 0, 0, 0, 0, false).
-		AddItem(center, 1, 0, 1, 3, 0, 0, false)
+	center.SetChangedFunc(func(index int, main, secondary string, shortcut rune) {
+		// Get index of [white] in string to differentiate file and folder
+		end := strings.LastIndex(main, "[white]")
 
-	// Layout for screens wider than 100 cells.
-	grid.AddItem(left, 1, 0, 1, 1, 0, 100, false).
-		AddItem(center, 1, 1, 1, 2, 0, 100, false)
-
-	refreshPanes(left, center)
-
+		// If there is no [white], it is a file
+		if end == -1 {
+			selected = main
+			selectedType = "file"
+			refreshPreview(preview)
+		} else {
+			main = main[5:end] // remove [red] and [white] from start and end of string
+			selected = main
+			selectedType = "folder"
+			refreshPreview(preview)
+		}
+	})
 
 	// Run app
-	if err := app.SetRoot(grid, true).SetFocus(center).Run(); err != nil {
+	if err := app.SetRoot(pages, true).SetFocus(center).Run(); err != nil {
 		panic(err)
 	}
 }
